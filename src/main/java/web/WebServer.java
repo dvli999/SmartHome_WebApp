@@ -27,7 +27,7 @@ public class WebServer {
     private static HttpServer httpServer;
 
     // --- DATABASE INTEGRATION: Use DatabaseManager instead of in-memory list ---
-    private static final DatabaseManager databaseManager = new DatabaseManager();
+    private static final MongoDBManager databaseManager = new MongoDBManager();;
 
     private static final List<Map<String, Object>> notifications = new CopyOnWriteArrayList<>();
     private static double threshold = 70.0;
