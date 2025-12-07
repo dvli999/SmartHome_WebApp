@@ -1,0 +1,7 @@
+module SmartHome {
+    interface Temps {
+        long getHeure();
+        long getJour();
+        long getWeekend();
+    };
+};

@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Energy System Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 50%, #0f172a 100%);
+        }
+        .glass {
+            background: rgba(30, 41, 59, 0.5);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(71, 85, 105, 0.5);
+        }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .status-connected { background-color: #10b981; }
+        .status-disconnected { background-color: #ef4444; }
+        .status-warning { background-color: #f59e0b; }
+    </style>
+</head>
+<body class="min-h-screen text-white p-4">
+<!-- Header -->
+<header class="glass rounded-xl p-6 mb-6 sticky top-4 z-50">
+    <div class="max-w-7xl mx-auto flex items-center justify-between">
+        <div class="flex items-center gap-4">
+            <div class="p-3 bg-blue-500 rounded-lg">
+                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                </svg>
+            </div>
+            <div>
+                <h1 class="text-3xl font-bold">Smart Energy System</h1>
+                <p class="text-sm text-slate-400">CORBA + ML + RMI Integration</p>
+            </div>
+        </div>
+        <div class="flex items-center gap-4">
+            <button id="clientViewBtn" class="px-4 py-2 bg-blue-500 rounded-lg hover:bg-blue-600 transition">
+                Client View
+            </button>
+            <button id="serverViewBtn" class="px-4 py-2 bg-slate-700 rounded-lg hover:bg-slate-600 transition">
+                Server View
+            </button>
+            <button id="refreshBtn" class="p-2 bg-slate-700 rounded-lg hover:bg-slate-600 transition">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                </svg>
+            </button>
+        </div>
+    </div>
+</header>
+
+<div class="max-w-7xl mx-auto">
+    <!-- Client View -->
+    <div id="clientView">
+        <!-- Stats Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-slate-400 text-sm">Current Consumption</span>
+                    <svg class="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                </div>
+                <div class="text-3xl font-bold mb-1" id="currentConsumption">--</div>
+                <div class="text-sm" id="consumptionStatus">--</div>
+            </div>
+
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-slate-400 text-sm">ML Prediction</span>
+                    <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+                </div>
+                <div class="text-3xl font-bold mb-1" id="prediction">--</div>
+                <div class="text-sm text-slate-400">Next hour forecast</div>
+            </div>
+
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-slate-400 text-sm">Time (CORBA)</span>
+                    <svg class="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                </div>
+                <div class="text-3xl font-bold mb-1" id="currentTime">--</div>
+                <div class="text-sm text-slate-400" id="dayInfo">--</div>
+            </div>
+
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-slate-400 text-sm">Active Devices</span>
+                    <svg class="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                </div>
+                <div class="text-3xl font-bold mb-1" id="activeDevices">--</div>
+                <div class="text-sm text-slate-400">Devices online</div>
+            </div>
+        </div>
+
+        <!-- Chart -->
+        <div class="glass rounded-xl p-6 mb-6">
+            <h2 class="text-xl font-bold mb-4">Energy Consumption History</h2>
+            <div class="relative h-96">
+                <canvas id="energyChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Device Control & Notifications -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <!-- Devices -->
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-bold">Device Control (RMI)</h2>
+                    <button id="shutdownAllBtn" class="px-3 py-1 bg-red-500 hover:bg-red-600 rounded-lg text-sm transition">
+                        Shutdown All
+                    </button>
+                </div>
+                <div id="deviceList" class="space-y-3">
+                    <!-- Devices will be populated here by the API -->
+                </div>
+            </div>
+
+            <!-- Notifications -->
+            <div class="glass rounded-xl p-6">
+                <h2 class="text-xl font-bold mb-4 flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"></path></svg>
+                    Notifications
+                    <span id="notifBadge" class="px-2 py-1 bg-red-500 rounded-full text-xs hidden">0</span>
+                </h2>
+                <div id="notificationList" class="space-y-2 max-h-80 overflow-y-auto">
+                    <!-- Notifications will be populated here by the API -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Server View -->
+    <div id="serverView" class="hidden">
+        <!-- System Status -->
+        <div class="glass rounded-xl p-6 mb-6">
+            <h2 class="text-xl font-bold mb-4">System Status</h2>
+            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4" id="systemStatus"></div>
+        </div>
+        <!-- Logs -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+            <div class="glass rounded-xl p-6">
+                <h2 class="text-xl font-bold mb-4">CORBA Service Logs</h2>
+                <div id="corbaLogs" class="space-y-2 max-h-96 overflow-y-auto font-mono text-xs"></div>
+            </div>
+            <div class="glass rounded-xl p-6">
+                <h2 class="text-xl font-bold mb-4">ML Service Logs</h2>
+                <div id="mlLogs" class="space-y-2 max-h-96 overflow-y-auto font-mono text-xs"></div>
+            </div>
+        </div>
+        <!-- Configuration -->
+        <div class="glass rounded-xl p-6">
+            <h2 class="text-xl font-bold mb-4">System Configuration</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                    <label class="block text-sm text-slate-400 mb-2">Consumption Threshold (kWh)</label>
+                    <input type="number" id="thresholdInput" value="70" class="w-full px-4 py-2 bg-slate-700 rounded-lg border border-slate-600 focus:outline-none focus:border-blue-500" />
+                </div>
+                <div>
+                    <label class="block text-sm text-slate-400 mb-2">Auto Shutdown</label>
+                    <label class="flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" id="autoShutdownCheck" checked class="w-5 h-5" />
+                        <span id="autoShutdownLabel">Enabled</span>
+                    </label>
+                </div>
+                <div class="col-span-2 flex gap-4">
+                    <button id="saveConfigBtn" class="px-6 py-2 bg-blue-500 hover:bg-blue-600 rounded-lg transition">Save Configuration</button>
+                    <button id="exportBtn" class="px-6 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition">Export Data</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const API_BASE = 'http://localhost:8080/api';
+    let energyChart = null;
+    let updateInterval = null;
+
+    document.addEventListener('DOMContentLoaded', () => {
+        initializeChart();
+        setupEventListeners();
+        startAutoUpdate();
+        fetchData();
+    });
+
+    function setupEventListeners() {
+        document.getElementById('clientViewBtn').addEventListener('click', () => switchView('client'));
+        document.getElementById('serverViewBtn').addEventListener('click', () => switchView('server'));
+        document.getElementById('refreshBtn').addEventListener('click', fetchData);
+        document.getElementById('shutdownAllBtn').addEventListener('click', shutdownAllDevices);
+        document.getElementById('saveConfigBtn').addEventListener('click', saveConfiguration);
+        document.getElementById('exportBtn').addEventListener('click', exportData);
+        document.getElementById('autoShutdownCheck').addEventListener('change', (e) => {
+            document.getElementById('autoShutdownLabel').textContent = e.target.checked ? 'Enabled' : 'Disabled';
+        });
+    }
+
+    function switchView(view) {
+        if (view === 'client') {
+            document.getElementById('clientView').classList.remove('hidden');
+            document.getElementById('serverView').classList.add('hidden');
+            document.getElementById('clientViewBtn').classList.add('bg-blue-500', 'hover:bg-blue-600');
+            document.getElementById('clientViewBtn').classList.remove('bg-slate-700', 'hover:bg-slate-600');
+            document.getElementById('serverViewBtn').classList.remove('bg-blue-500', 'hover:bg-blue-600');
+            document.getElementById('serverViewBtn').classList.add('bg-slate-700', 'hover:bg-slate-600');
+        } else {
+            document.getElementById('clientView').classList.add('hidden');
+            document.getElementById('serverView').classList.remove('hidden');
+            document.getElementById('serverViewBtn').classList.add('bg-blue-500', 'hover:bg-blue-600');
+            document.getElementById('serverViewBtn').classList.remove('bg-slate-700', 'hover:bg-slate-600');
+            document.getElementById('clientViewBtn').classList.remove('bg-blue-500', 'hover:bg-blue-600');
+            document.getElementById('clientViewBtn').classList.add('bg-slate-700', 'hover:bg-slate-600');
+            fetchSystemStatus();
+        }
+    }
+
+    function initializeChart() {
+        const ctx = document.getElementById('energyChart').getContext('2d');
+        energyChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Actual Consumption', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)', fill: true
+                }, {
+                    label: 'ML Prediction', data: [], borderColor: '#8b5cf6', backgroundColor: 'rgba(139, 92, 246, 0.1)', fill: true
+                }, {
+                    label: 'Threshold', data: [], borderColor: '#ef4444', borderDash: [5, 5], fill: false
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                scales: {
+                    y: { beginAtZero: true, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+                    x: { grid: { color: '#334155' }, ticks: { color: '#94a3b8' } }
+                },
+                plugins: { legend: { labels: { color: '#94a3b8' } } }
+            }
+        });
+    }
+
+    async function fetchData() {
+        try {
+            const [realtimeRes, historyRes, notifsRes, devicesRes] = await Promise.all([
+                fetch(`${API_BASE}/realtime`),
+                fetch(`${API_BASE}/history`),
+                fetch(`${API_BASE}/notifications`),
+                fetch(`${API_BASE}/devices`)
+            ]);
+
+            if (!realtimeRes.ok || !historyRes.ok || !notifsRes.ok || !devicesRes.ok) {
+                throw new Error('One or more API endpoints failed');
+            }
+
+            const realtime = await realtimeRes.json();
+            const historyData = await historyRes.json();
+            const notifs = await notifsRes.json();
+            const devices = await devicesRes.json();
+
+            updateRealtimeData(realtime);
+            updateChart(historyData);
+            updateNotifications(notifs);
+            updateDevices(devices);
+
+        } catch (error) {
+            console.error('Failed to fetch data:', error);
+            showSimulatedData();
+        }
+    }
+
+    function updateRealtimeData(data) {
+        document.getElementById('currentConsumption').textContent = `${data.actual} kWh`;
+        document.getElementById('consumptionStatus').textContent = `Status: ${data.status}`;
+        document.getElementById('consumptionStatus').className = data.status === 'ELEVEE' ? 'text-sm text-red-400' : 'text-sm text-green-400';
+        document.getElementById('prediction').textContent = `${data.predicted} kWh`;
+        document.getElementById('currentTime').textContent = `${String(data.heure).padStart(2, '0')}:00`;
+        document.getElementById('dayInfo').textContent = `Day ${data.jour} • ${data.weekend ? 'Weekend' : 'Weekday'}`;
+    }
+
+    function updateChart(data) {
+        const history = data.history;
+        const currentThreshold = data.threshold;
+        if (!history || history.length === 0) return;
+
+        const lastDataPoints = history.slice(-60); // Show more data points if available
+        energyChart.data.labels = lastDataPoints.map(d => {
+            const date = new Date(d.timestamp);
+            return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+        });
+        energyChart.data.datasets[0].data = lastDataPoints.map(d => d.actual);
+        energyChart.data.datasets[1].data = lastDataPoints.map(d => d.predicted);
+        energyChart.data.datasets[2].data = lastDataPoints.map(() => currentThreshold);
+        energyChart.update();
+    }
+
+    function updateDevices(devices) {
+        const deviceList = document.getElementById('deviceList');
+        if (!devices) {
+            deviceList.innerHTML = '<p class="text-slate-400">Could not load device data.</p>';
+            return;
+        }
+        const activeDevices = devices.filter(d => d.isOn).length;
+        document.getElementById('activeDevices').textContent = `${activeDevices}/${devices.length}`;
+
+        deviceList.innerHTML = devices.map(device => {
+            const isOn = device.isOn;
+            return `
+                <div class="flex items-center justify-between p-3 bg-slate-700/50 rounded-lg">
+                    <div class="flex items-center gap-3">
+                        <svg class="w-5 h-5 ${isOn ? 'text-green-400' : 'text-slate-500'}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                        <span>${device.name}</span>
+                    </div>
+                    <div class="px-4 py-1 rounded-lg text-sm ${isOn ? 'bg-green-500/50 text-green-300' : 'bg-red-500/50 text-red-300'}">
+                        ${isOn ? 'ON' : 'OFF'}
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function updateNotifications(notifs) {
+        const list = document.getElementById('notificationList');
+        const unread = notifs.filter(n => !n.read).length;
+
+        if (unread > 0) {
+            document.getElementById('notifBadge').textContent = unread;
+            document.getElementById('notifBadge').classList.remove('hidden');
+        } else {
+            document.getElementById('notifBadge').classList.add('hidden');
+        }
+
+        list.innerHTML = notifs.map(n => {
+            const icons = {
+                alert: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>',
+                warning: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>',
+                success: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>',
+                info: '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>'
+            };
+            const colors = { alert: 'red', warning: 'orange', success: 'green', info: 'blue' };
+            return `
+                <div class="p-3 rounded-lg cursor-pointer transition ${n.read ? 'bg-slate-700/30' : 'bg-slate-700/70'}" onclick="markRead(${n.id})">
+                    <div class="flex items-start gap-2">
+                        <svg class="w-5 h-5 text-${colors[n.type] || 'slate'}-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">${icons[n.type] || icons.info}</svg>
+                        <div class="flex-1 min-w-0">
+                            <p class="text-sm ${n.read ? 'text-slate-400' : 'text-white'}">${n.message}</p>
+                            <div class="flex items-center gap-2 mt-1">
+                                <span class="text-xs text-slate-500">${n.time}</span>
+                                <span class="text-xs text-slate-500">•</span>
+                                <span class="text-xs text-slate-500">${n.source}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    async function fetchSystemStatus() {
+        try {
+            const res = await fetch(`${API_BASE}/status`);
+            const status = await res.json();
+            const statusDiv = document.getElementById('systemStatus');
+            statusDiv.innerHTML = Object.entries(status).map(([service, state]) => `
+                <div class="p-4 bg-slate-700/50 rounded-lg">
+                    <div class="flex items-center gap-2 mb-2">
+                        <span class="status-dot status-${state === 'connected' || state === 'running' || state === 'active' ? 'connected' : 'disconnected'}"></span>
+                        <span class="text-sm font-medium capitalize">${service.replace(/([A-Z])/g, ' $1').trim()}</span>
+                    </div>
+                    <div class="text-xs text-slate-400">${state}</div>
+                </div>
+            `).join('');
+            updateLogs();
+        } catch (error) { console.error('Failed to fetch system status:', error); }
+    }
+
+    function updateLogs() { /* Simulated logs */ }
+
+    function showSimulatedData() {
+        const now = new Date();
+        updateRealtimeData({
+            heure: now.getHours(), jour: now.getDay() || 7, weekend: now.getDay() === 0 || now.getDay() === 6 ? 1 : 0,
+            actual: 45.2, predicted: 47.8, status: 'NORMAL'
+        });
+        updateNotifications([{ id: 1, type: 'info', message: 'API server not running - showing simulated data', time: 'now', source: 'System', read: false }]);
+        updateDevices([{name: 'Heating System', isOn: true}, {name: 'Lighting Grid', isOn: false}]);
+    }
+
+    async function shutdownAllDevices() {
+        if (confirm('Are you sure you want to shutdown all devices?')) {
+            try {
+                await fetch(`${API_BASE}/device/shutdown-all`, { method: 'POST' });
+                fetchData(); // Instantly refresh data
+            } catch (error) {
+                console.error('Failed to shutdown devices:', error);
+            }
+        }
+    }
+
+    async function saveConfiguration() {
+        const threshold = document.getElementById('thresholdInput').value;
+        try {
+            const res = await fetch(`${API_BASE}/threshold`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ threshold: parseFloat(threshold) })
+            });
+            if (!res.ok) throw new Error('Failed to save');
+            const data = await res.json();
+            if (energyChart && data.success) {
+                energyChart.data.datasets[2].data = energyChart.data.datasets[2].data.map(() => data.threshold);
+                energyChart.update();
+            }
+            alert('Configuration saved successfully!');
+        } catch (error) {
+            console.error('Failed to save configuration:', error);
+            alert('Failed to save configuration');
+        }
+    }
+
+    function exportData() { /* Export logic */ }
+    function markRead(id) { console.log('Marking notification as read:', id); }
+
+    function startAutoUpdate() {
+        updateInterval = setInterval(fetchData, 5000);
+    }
+
+    window.addEventListener('beforeunload', () => {
+        if (updateInterval) clearInterval(updateInterval);
+    });
+</script>
+</body>
+</html>
