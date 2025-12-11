@@ -381,7 +381,14 @@
         } catch (error) { console.error('Failed to fetch system status:', error); }
     }
 
-    function updateLogs() { /* Simulated logs */ }
+    function updateLogs() {
+        fetch(`${API_BASE}/logs`).then(res => res.json())
+            .then(logs => {
+                document.getElementById('corbaLogs').innerHTML = logs.corba.join('<br>');
+                document.getElementById('mlLogs').innerHTML = logs.ml.join('<br>');
+            }).catch(console.error);
+    }
+
 
     function showSimulatedData() {
         const now = new Date();

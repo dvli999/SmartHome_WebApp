@@ -5,19 +5,35 @@ import org.json.*;
 import corba.SmartHome.*;
 import org.omg.CORBA.ORB;
 import org.omg.CosNaming.*;
+import soap.SoapServicePublisher;
+
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import java.rmi.Naming;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Collectors;
 
+/**
+ * WebServer (merged) - Java 1.8 compatible
+ * - REST endpoints
+ * - SOAP publisher integration (via SoapServicePublisher)
+ * - CORBA client + server launcher helpers
+ * - RMI server launcher helper
+ * - MongoDBManager usage for persistence (external)
+ *
+ * NOTE: This file assumes external classes are present:
+ * - MongoDBManager (with init, saveEnergyRecord, getLatestEnergyRecord, getEnergyHistory, close)
+ * - SoapServicePublisher with methods publishServices() and stopServices()
+ * - corba.TempsImpl and temps CORBA artifacts
+ * - rmi.AppareilImpl and rmi.AppareilInterface
+ */
 public class WebServer {
 
     private static ORB orb;
     private static Temps tempsService;
-    private static final int WEB_PORT = 8080;
+    private static final int WEB_PORT = 8088;
+    private static final int SOAP_PORT = 8089;
     private static final int CORBA_PORT = 1050;
     private static final int RMI_PORT = 1100;
 
@@ -26,9 +42,7 @@ public class WebServer {
     private static Thread rmiServerThread;
     private static HttpServer httpServer;
 
-    // --- DATABASE INTEGRATION: Use DatabaseManager instead of in-memory list ---
-    private static final MongoDBManager databaseManager = new MongoDBManager();;
-
+    private static final MongoDBManager databaseManager = new MongoDBManager();
     private static final List<Map<String, Object>> notifications = new CopyOnWriteArrayList<>();
     private static double threshold = 70.0;
     private static boolean isRunning = true;
@@ -36,11 +50,21 @@ public class WebServer {
     private static final List<Device> devices = new CopyOnWriteArrayList<>();
 
     private static class Device {
-        String name; double baseConsumption; boolean isOn;
-        Device(String name, double baseConsumption, boolean isOn) { this.name = name; this.baseConsumption = baseConsumption; this.isOn = isOn; }
+        String name;
+        double baseConsumption;
+        boolean isOn;
+
+        Device(String name, double baseConsumption, boolean isOn) {
+            this.name = name;
+            this.baseConsumption = baseConsumption;
+            this.isOn = isOn;
+        }
+
         public JSONObject toJson() {
             JSONObject json = new JSONObject();
-            json.put("name", this.name); json.put("consumption", this.baseConsumption); json.put("isOn", this.isOn);
+            json.put("name", this.name);
+            json.put("consumption", this.baseConsumption);
+            json.put("isOn", this.isOn);
             return json;
         }
     }
@@ -59,30 +83,47 @@ public class WebServer {
         System.out.println("╚════════════════════════════════════════════════════════════╝");
         System.out.println();
 
-        Runtime.getRuntime().addShutdownHook(new Thread(WebServer::cleanup));
+        Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
+            @Override
+            public void run() {
+                cleanup();
+            }
+        }));
 
         try {
-            databaseManager.init(); // Initialize the database connection
+            databaseManager.init(); // Initialize DB
             initializeDevices();
             startORBD();
             startCORBAServer();
             startRMIServer();
             initCORBA(args);
+
+            // Start SOAP services (if available)
+            startSOAPServices();
+
+            // Start HTTP server (REST)
             startHTTPServer();
+
+            // Start background collector
             startBackgroundCollector();
 
             System.out.println("\n╔════════════════════════════════════════════════════════════╗");
             System.out.println("║              ✓ System Ready!                              ║");
             System.out.println("╚════════════════════════════════════════════════════════════╝");
             System.out.println("\n🌐 Dashboard URL: http://localhost:" + WEB_PORT);
+            System.out.println("🌐 SOAP Services: http://localhost:" + SOAP_PORT + "/soap/");
             System.out.println("\nServices running:");
-            System.out.println("  ✓ Database Service (H2)");
+            System.out.println("  ✓ Database Service (MongoDB)");
             System.out.println("  ✓ CORBA Name Service (port " + CORBA_PORT + ")");
             System.out.println("  ✓ CORBA Server");
             System.out.println("  ✓ RMI Server (port " + RMI_PORT + ")");
-            System.out.println("  ✓ Web Server (port " + WEB_PORT + ")");
+            System.out.println("  ✓ REST Web Server (port " + WEB_PORT + ")");
+            System.out.println("  ✓ SOAP Web Services (port " + SOAP_PORT + ")");
             System.out.println("  ✓ ML Service\n");
-            System.out.println("Press Ctrl+C to stop all services\n");
+            System.out.println("SOAP WSDL URLs:");
+            System.out.println("  • http://localhost:" + SOAP_PORT + "/soap/EnergyManagementService?wsdl");
+            System.out.println("  • http://localhost:" + SOAP_PORT + "/soap/DeviceManagementService?wsdl");
+            System.out.println("\nPress Ctrl+C to stop all services\n");
 
             openBrowser("http://localhost:" + WEB_PORT);
 
@@ -98,6 +139,43 @@ public class WebServer {
         }
     }
 
+    /* ------------------- SOAP START / STOP ------------------- */
+
+    private static void startSOAPServices() {
+        System.out.print("Starting SOAP Web Services... ");
+        try {
+            Thread soapThread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        SoapServicePublisher.publishServices();
+                    } catch (Exception e) {
+                        System.err.println("SOAP service error: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                }
+            });
+            soapThread.setDaemon(false);
+            soapThread.start();
+            // give it a moment
+            try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+            System.out.println("✓");
+        } catch (Exception e) {
+            System.out.println("✗");
+            System.err.println("Warning: Could not start SOAP services: " + e.getMessage());
+        }
+    }
+
+    private static void stopSOAPServices() {
+        try {
+            SoapServicePublisher.stopServices();
+        } catch (Exception e) {
+            System.err.println("Error stopping SOAP services: " + e.getMessage());
+        }
+    }
+
+    /* ------------------- HTTP Server / Handlers ------------------- */
+
     private static void startHTTPServer() throws Exception {
         System.out.print("Starting Web Server... ");
         httpServer = HttpServer.create(new InetSocketAddress(WEB_PORT), 0);
@@ -110,98 +188,79 @@ public class WebServer {
         httpServer.createContext("/api/notifications", new NotificationsHandler());
         httpServer.createContext("/api/threshold", new ThresholdHandler());
         httpServer.createContext("/api/devices", new DevicesHandler());
+        // Add SOAP info endpoint
+        httpServer.createContext("/api/soap-info", new SoapInfoHandler());
         httpServer.setExecutor(Executors.newFixedThreadPool(10));
         httpServer.start();
         System.out.println("✓");
     }
 
-    private static void startBackgroundCollector() {
-        ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-        scheduler.scheduleAtFixedRate(() -> {
-            try {
-                collectEnergyData();
-            } catch (Exception e) { /* Silently handle */ }
-        }, 5, 5, TimeUnit.SECONDS);
+    // SOAP info endpoint
+    static class SoapInfoHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            setCORS(exchange);
+            if ("OPTIONS".equals(exchange.getRequestMethod())) {
+                exchange.sendResponseHeaders(204, -1);
+                return;
+            }
+            JSONObject soapInfo = new JSONObject();
+            soapInfo.put("enabled", true);
+            soapInfo.put("port", SOAP_PORT);
+            JSONArray services = new JSONArray();
+            JSONObject energyService = new JSONObject();
+            energyService.put("name", "EnergyManagementService");
+            energyService.put("endpoint", "http://localhost:" + SOAP_PORT + "/soap/EnergyManagementService");
+            energyService.put("wsdl", "http://localhost:" + SOAP_PORT + "/soap/EnergyManagementService?wsdl");
+            services.put(energyService);
+            JSONObject deviceService = new JSONObject();
+            deviceService.put("name", "DeviceManagementService");
+            deviceService.put("endpoint", "http://localhost:" + SOAP_PORT + "/soap/DeviceManagementService");
+            deviceService.put("wsdl", "http://localhost:" + SOAP_PORT + "/soap/DeviceManagementService?wsdl");
+            services.put(deviceService);
+            soapInfo.put("services", services);
+            sendJSON(exchange, soapInfo.toString());
+        }
     }
 
-    private static void collectEnergyData() {
-        try {
-            if (tempsService == null) { initCORBA(new String[]{}); return; }
-
-            double currentActualConsumption = 0.0;
-            for (Device device : devices) {
-                boolean wasOn = device.isOn;
-                if (Math.random() < 0.1) { device.isOn = !device.isOn; }
-                if (device.isOn) { currentActualConsumption += device.baseConsumption; }
-                if (wasOn && !device.isOn) { addNotification("warning", device.name + " has been stopped.", "Device Control"); }
-                else if (!wasOn && device.isOn) { addNotification("info", device.name + " is back online.", "Device Control"); }
-            }
-            currentActualConsumption += (Math.random() * 4 - 2);
-
-            int heure = tempsService.getHeure();
-            int jour = tempsService.getJour();
-            int weekend = tempsService.getWeekend();
-            String prediction = callMLPrediction(heure, jour, weekend);
-            double predictedConsumption = parsePrediction(prediction);
-
-            Map<String, Object> data = new HashMap<>();
-            data.put("timestamp", System.currentTimeMillis());
-            data.put("heure", heure);
-            data.put("jour", jour);
-            data.put("weekend", weekend);
-            data.put("actual", Math.round(currentActualConsumption * 10.0) / 10.0);
-            data.put("predicted", Math.round(predictedConsumption * 10.0) / 10.0);
-            data.put("status", currentActualConsumption > threshold ? "ELEVEE" : "NORMAL");
-
-            // --- DATABASE INTEGRATION: Save to database ---
-            databaseManager.saveEnergyRecord(data);
-
-            if (currentActualConsumption > threshold) {
-                addNotification("alert", "High consumption detected: " + data.get("actual") + " kWh", "System Alert");
+    static class DashboardHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            setCORS(exchange);
+            if ("OPTIONS".equals(exchange.getRequestMethod())) { exchange.sendResponseHeaders(204, -1); return; }
+            String path = exchange.getRequestURI().getPath();
+            if (path.equals("/") || path.equals("/index.html")) {
+                String html = getDashboardHTML();
+                exchange.getResponseHeaders().add("Content-Type", "text/html");
+                byte[] response = html.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, response.length);
+                OutputStream os = exchange.getResponseBody();
                 try {
-                    rmi.AppareilInterface appareil = (rmi.AppareilInterface) Naming.lookup("rmi://localhost:" + RMI_PORT + "/AppareilService");
-                    appareil.eteindre();
-                    for (Device device : devices) {
-                        if (device.isOn) {
-                            device.isOn = false;
-                            addNotification("success", device.name + " shut down automatically via RMI.", "RMI Service");
-                        }
-                    }
-                } catch (Exception e) { /* Silently handle RMI errors */ }
+                    os.write(response);
+                } finally {
+                    os.close();
+                }
+            } else {
+                sendError(exchange, "Not Found");
             }
-        } catch (Exception e) { /* Silently handle other errors */ }
-    }
-
-    private static void addNotification(String type, String message, String source) {
-        Map<String, Object> notif = new HashMap<>();
-        notif.put("id", System.currentTimeMillis());
-        notif.put("type", type);
-        notif.put("message", message);
-        notif.put("time", "just now");
-        notif.put("source", source);
-        notif.put("read", false);
-        notifications.add(0, notif);
-        if (notifications.size() > 50) {
-            notifications.remove(notifications.size() - 1);
         }
     }
 
-    private static void cleanup() {
-        System.out.println("\nStopping services gracefully...");
-        isRunning = false;
-        if (httpServer != null) {
-            httpServer.stop(1);
-            System.out.println("  ✓ Web Server stopped");
+    static class StatusHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            setCORS(exchange);
+            if ("OPTIONS".equals(exchange.getRequestMethod())) { exchange.sendResponseHeaders(204, -1); return; }
+            JSONObject status = new JSONObject();
+            status.put("corba", tempsService != null ? "connected" : "disconnected");
+            status.put("ml", "active");
+            status.put("rmi", checkRMI() ? "connected" : "disconnected");
+            status.put("nameService", orbdProcess != null && orbdProcess.isAlive() ? "running" : "stopped");
+            status.put("webServer", "running");
+            sendJSON(exchange, status.toString());
         }
-        databaseManager.close(); // Close the database connection
-        if (orbdProcess != null && orbdProcess.isAlive()) {
-            orbdProcess.destroy();
-            System.out.println("  ✓ CORBA Name Service process terminated");
-        }
-        System.out.println("✓ Cleanup complete");
     }
 
-    // --- DATABASE INTEGRATION: RealtimeHandler now reads from the database ---
     static class RealtimeHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -220,15 +279,12 @@ public class WebServer {
         }
     }
 
-    // --- DATABASE INTEGRATION: HistoryHandler now reads from the database ---
     static class HistoryHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             setCORS(exchange);
             if ("OPTIONS".equals(exchange.getRequestMethod())) { exchange.sendResponseHeaders(204, -1); return; }
-
             List<Map<String, Object>> history = databaseManager.getEnergyHistory();
-
             JSONObject response = new JSONObject();
             response.put("history", new JSONArray(history));
             response.put("threshold", threshold);
@@ -236,7 +292,30 @@ public class WebServer {
         }
     }
 
-    // --- UNCHANGED HANDLERS AND METHODS BELOW ---
+    static class PredictHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            setCORS(exchange);
+            if ("OPTIONS".equals(exchange.getRequestMethod())) { exchange.sendResponseHeaders(204, -1); return; }
+            if (!"POST".equals(exchange.getRequestMethod())) { sendError(exchange, "Method not allowed"); return; }
+            try {
+                String body = new String(readAllBytesFromStream(exchange.getRequestBody()), StandardCharsets.UTF_8);
+                JSONObject request = new JSONObject(body);
+                int heure = request.getInt("heure");
+                int jour = request.getInt("jour");
+                int weekend = request.getInt("weekend");
+                String prediction = callMLPrediction(heure, jour, weekend);
+                double predictedConsumption = parsePrediction(prediction);
+                JSONObject response = new JSONObject();
+                response.put("prediction", predictedConsumption);
+                response.put("status", predictedConsumption > threshold ? "ELEVEE" : "NORMAL");
+                response.put("threshold", threshold);
+                sendJSON(exchange, response.toString());
+            } catch (Exception e) {
+                sendError(exchange, "Prediction failed: " + e.getMessage());
+            }
+        }
+    }
 
     static class DeviceHandler implements HttpHandler {
         @Override
@@ -276,175 +355,6 @@ public class WebServer {
         }
     }
 
-    // ... other handlers (Dashboard, Status, Predict, Notifications, Threshold) and utility methods ...
-    // [This section is identical to the previous version and is included for completeness]
-
-    private static void startORBD() {
-        try {
-            System.out.print("Starting CORBA Name Service... ");
-            if (isPortInUse(CORBA_PORT)) { System.out.println("✓ (already running)"); return; }
-            ProcessBuilder pb = new ProcessBuilder("orbd", "-ORBInitialPort", String.valueOf(CORBA_PORT), "-ORBInitialHost", "localhost");
-            pb.redirectErrorStream(true);
-            orbdProcess = pb.start();
-            Thread.sleep(2000);
-            if (orbdProcess.isAlive()) { System.out.println("✓"); } else { throw new Exception("ORBD failed to start."); }
-        } catch (Exception e) {
-            System.out.println("✗");
-            System.err.println("Warning: Could not start ORBD automatically. Please start it manually.");
-        }
-    }
-
-    private static void startCORBAServer() {
-        System.out.print("Starting CORBA Server... ");
-        corbaServerThread = new Thread(() -> {
-            try {
-                corba.TempsImpl.main(new String[]{
-                        "-ORBInitialPort", String.valueOf(CORBA_PORT),
-                        "-ORBInitialHost", "127.0.0.1",
-                        "-ORBServerHost", "127.0.0.1"
-                });
-            } catch (Exception e) { System.err.println("CORBA Server error: " + e.getMessage()); }
-        });
-        corbaServerThread.setDaemon(true);
-        corbaServerThread.start();
-        try { Thread.sleep(3000); System.out.println("✓"); } catch (InterruptedException e) { System.out.println("✗"); }
-    }
-
-    private static void startRMIServer() {
-        System.out.print("Starting RMI Server... ");
-        rmiServerThread = new Thread(() -> {
-            try { rmi.AppareilImpl.main(new String[]{}); } catch (Exception e) { System.err.println("RMI Server error: " + e.getMessage()); }
-        });
-        rmiServerThread.setDaemon(true);
-        rmiServerThread.start();
-        try { Thread.sleep(3000); System.out.println("✓"); } catch (InterruptedException e) { System.out.println("✗"); }
-    }
-
-    private static void initCORBA(String[] args) {
-        System.out.print("Connecting to CORBA services... ");
-        try {
-            orb = ORB.init(new String[]{"-ORBInitialPort", String.valueOf(CORBA_PORT), "-ORBInitialHost", "127.0.0.1"}, null);
-            org.omg.CORBA.Object objRef = orb.resolve_initial_references("NameService");
-            NamingContextExt ncRef = NamingContextExtHelper.narrow(objRef);
-            tempsService = TempsHelper.narrow(ncRef.resolve_str("TempsService"));
-            System.out.println("✓");
-        } catch (Exception e) {
-            System.out.println("✗");
-            System.err.println("Warning: CORBA connection failed. Will retry automatically.");
-        }
-    }
-
-    private static String callMLPrediction(int heure, int jour, int weekend) {
-        String pythonExecutablePath = "C:\\ProgramData\\anaconda3\\envs\\medali\\python.exe";
-        if (new File(pythonExecutablePath).exists()) {
-            String result = tryPythonCommand(pythonExecutablePath, heure, jour, weekend);
-            if (result != null) return result;
-        }
-        String result = tryPythonCommand("python3", heure, jour, weekend);
-        if (result != null) return result;
-        result = tryPythonCommand("python", heure, jour, weekend);
-        if (result != null) return result;
-        System.err.println("Warning: Python script execution failed. Falling back to Java simulation.");
-        return simulatePrediction(heure, jour, weekend);
-    }
-
-    private static String tryPythonCommand(String command, int heure, int jour, int weekend) {
-        try {
-            String projectDir = System.getProperty("user.dir");
-            String scriptPath = new File(projectDir, "ml/predict_ml.py").getAbsolutePath();
-            ProcessBuilder pb = new ProcessBuilder(command, scriptPath, String.valueOf(heure), String.valueOf(jour), String.valueOf(weekend));
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            StringBuilder output = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) { output.append(line).append(System.lineSeparator()); }
-            }
-            if (!p.waitFor(5, TimeUnit.SECONDS)) { p.destroyForcibly(); return null; }
-            if (p.exitValue() != 0) { return null; }
-            return output.toString();
-        } catch (IOException | InterruptedException e) { return null; }
-    }
-
-    private static String simulatePrediction(int heure, int jour, int weekend) {
-        double base = 35.0;
-        if (0 <= heure && heure < 6) base -= 10; else if (6 <= heure && heure < 9) base += 15; else if (9 <= heure && heure < 17) base += 5; else if (17 <= heure && heure < 22) base += 25;
-        if (weekend == 1 && 9 <= heure && heure < 17) base += 10;
-        base += (jour % 3) * 2;
-        return "Predicted energy consumption: " + String.format("%.1f", base) + " kWh";
-    }
-
-    private static double parsePrediction(String output) {
-        try {
-            return Arrays.stream(output.split(System.lineSeparator())).filter(line -> line.contains("Predicted energy consumption:")).map(line -> line.replaceAll("[^0-9.]", "")).mapToDouble(Double::parseDouble).findFirst().orElse(45.0);
-        } catch (Exception e) { return 45.0; }
-    }
-
-    private static boolean isPortInUse(int port) {
-        try (ServerSocket socket = new ServerSocket(port)) { return false; } catch (IOException e) { return true; }
-    }
-
-    private static void openBrowser(String url) {
-        try {
-            String os = System.getProperty("os.name").toLowerCase();
-            if (os.contains("win")) Runtime.getRuntime().exec("rundll32 url.dll,FileProtocolHandler " + url);
-            else if (os.contains("mac")) Runtime.getRuntime().exec("open " + url);
-            else if (os.contains("nix") || os.contains("nux")) Runtime.getRuntime().exec("xdg-open " + url);
-        } catch (Exception e) { /* Silently fail */ }
-    }
-
-    static class DashboardHandler implements HttpHandler {
-        @Override
-        public void handle(HttpExchange exchange) throws IOException {
-            setCORS(exchange);
-            if ("OPTIONS".equals(exchange.getRequestMethod())) { exchange.sendResponseHeaders(204, -1); return; }
-            String path = exchange.getRequestURI().getPath();
-            if (path.equals("/") || path.equals("/index.html")) {
-                String html = getDashboardHTML();
-                exchange.getResponseHeaders().add("Content-Type", "text/html");
-                byte[] response = html.getBytes(StandardCharsets.UTF_8);
-                exchange.sendResponseHeaders(200, response.length);
-                try (OutputStream os = exchange.getResponseBody()) { os.write(response); }
-            } else { sendError(exchange, "Not Found"); }
-        }
-    }
-
-    static class StatusHandler implements HttpHandler {
-        @Override
-        public void handle(HttpExchange exchange) throws IOException {
-            setCORS(exchange);
-            if ("OPTIONS".equals(exchange.getRequestMethod())) { exchange.sendResponseHeaders(204, -1); return; }
-            JSONObject status = new JSONObject();
-            status.put("corba", tempsService != null ? "connected" : "disconnected");
-            status.put("ml", "active");
-            status.put("rmi", checkRMI() ? "connected" : "disconnected");
-            status.put("nameService", orbdProcess != null && orbdProcess.isAlive() ? "running" : "stopped");
-            status.put("webServer", "running");
-            sendJSON(exchange, status.toString());
-        }
-    }
-
-    static class PredictHandler implements HttpHandler {
-        @Override
-        public void handle(HttpExchange exchange) throws IOException {
-            setCORS(exchange);
-            if ("OPTIONS".equals(exchange.getRequestMethod())) { exchange.sendResponseHeaders(204, -1); return; }
-            if (!"POST".equals(exchange.getRequestMethod())) { sendError(exchange, "Method not allowed"); return; }
-            try {
-                String body = new String(readAllBytesFromStream(exchange.getRequestBody()), StandardCharsets.UTF_8);
-                JSONObject request = new JSONObject(body);
-                int heure = request.getInt("heure"); int jour = request.getInt("jour"); int weekend = request.getInt("weekend");
-                String prediction = callMLPrediction(heure, jour, weekend);
-                double predictedConsumption = parsePrediction(prediction);
-                JSONObject response = new JSONObject();
-                response.put("prediction", predictedConsumption);
-                response.put("status", predictedConsumption > threshold ? "ELEVEE" : "NORMAL");
-                response.put("threshold", threshold);
-                sendJSON(exchange, response.toString());
-            } catch (Exception e) { sendError(exchange, "Prediction failed: " + e.getMessage()); }
-        }
-    }
-
     static class NotificationsHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -468,14 +378,251 @@ public class WebServer {
                 response.put("success", true);
                 response.put("threshold", threshold);
                 sendJSON(exchange, response.toString());
-            } catch (Exception e) { sendError(exchange, "Failed to update threshold: " + e.getMessage()); }
+            } catch (Exception e) {
+                sendError(exchange, "Failed to update threshold: " + e.getMessage());
+            }
         }
     }
 
+    /* ------------------- Utilities and Background ------------------- */
+
+    private static void startBackgroundCollector() {
+        ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+        scheduler.scheduleAtFixedRate(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    collectEnergyData();
+                } catch (Exception e) { /* silently ignore */ }
+            }
+        }, 5, 5, TimeUnit.SECONDS);
+    }
+
+    private static void collectEnergyData() {
+        try {
+            if (tempsService == null) { initCORBA(new String[]{}); return; }
+
+            double currentActualConsumption = 0.0;
+            for (Device device : devices) {
+                boolean wasOn = device.isOn;
+                if (Math.random() < 0.1) { device.isOn = !device.isOn; }
+                if (device.isOn) { currentActualConsumption += device.baseConsumption; }
+                if (wasOn && !device.isOn) {
+                    addNotification("warning", device.name + " has been stopped.", "Device Control");
+                } else if (!wasOn && device.isOn) {
+                    addNotification("info", device.name + " is back online.", "Device Control");
+                }
+            }
+            currentActualConsumption += (Math.random() * 4 - 2);
+
+            int heure = tempsService.getHeure();
+            int jour = tempsService.getJour();
+            int weekend = tempsService.getWeekend();
+            String prediction = callMLPrediction(heure, jour, weekend);
+            double predictedConsumption = parsePrediction(prediction);
+
+            Map<String, Object> data = new HashMap<String, Object>();
+            data.put("timestamp", System.currentTimeMillis());
+            data.put("heure", heure);
+            data.put("jour", jour);
+            data.put("weekend", weekend);
+            data.put("actual", Math.round(currentActualConsumption * 10.0) / 10.0);
+            data.put("predicted", Math.round(predictedConsumption * 10.0) / 10.0);
+            data.put("status", currentActualConsumption > threshold ? "ELEVEE" : "NORMAL");
+
+            databaseManager.saveEnergyRecord(data);
+
+            if (currentActualConsumption > threshold) {
+                addNotification("alert", "High consumption detected: " + data.get("actual") + " kWh", "System Alert");
+                try {
+                    rmi.AppareilInterface appareil = (rmi.AppareilInterface)
+                            Naming.lookup("rmi://localhost:" + RMI_PORT + "/AppareilService");
+                    appareil.eteindre();
+                    for (Device device : devices) {
+                        if (device.isOn) {
+                            device.isOn = false;
+                            addNotification("success", device.name + " shut down automatically via RMI.", "RMI Service");
+                        }
+                    }
+                } catch (Exception e) { /* Silently handle RMI errors */ }
+            }
+        } catch (Exception e) { /* Silently handle other errors */ }
+    }
+
+    private static void addNotification(String type, String message, String source) {
+        Map<String, Object> notif = new HashMap<String, Object>();
+        notif.put("id", System.currentTimeMillis());
+        notif.put("type", type);
+        notif.put("message", message);
+        notif.put("time", "just now");
+        notif.put("source", source);
+        notif.put("read", false);
+        notifications.add(0, notif);
+        if (notifications.size() > 50) {
+            notifications.remove(notifications.size() - 1);
+        }
+    }
+
+    private static void cleanup() {
+        System.out.println("\nStopping services gracefully...");
+        isRunning = false;
+        if (httpServer != null) {
+            httpServer.stop(1);
+            System.out.println("  ✓ Web Server stopped");
+        }
+        // Stop SOAP
+        stopSOAPServices();
+        databaseManager.close();
+        if (orbdProcess != null && orbdProcess.isAlive()) {
+            orbdProcess.destroy();
+            System.out.println("  ✓ CORBA Name Service process terminated");
+        }
+        System.out.println("✓ Cleanup complete");
+    }
+
+    /* ------------------- CORBA / RMI / ORBD Helpers ------------------- */
+
+    private static void startORBD() {
+        try {
+            System.out.print("Starting CORBA Name Service... ");
+            if (isPortInUse(CORBA_PORT)) {
+                System.out.println("✓ (already running)");
+                return;
+            }
+            ProcessBuilder pb = new ProcessBuilder("orbd", "-ORBInitialPort", String.valueOf(CORBA_PORT), "-ORBInitialHost", "localhost");
+            pb.redirectErrorStream(true);
+            orbdProcess = pb.start();
+            Thread.sleep(2000);
+            if (orbdProcess.isAlive()) { System.out.println("✓"); } else { throw new Exception("ORBD failed to start."); }
+        } catch (Exception e) {
+            System.out.println("✗");
+            System.err.println("Warning: Could not start ORBD automatically. Please start it manually.");
+        }
+    }
+
+    private static void startCORBAServer() {
+        System.out.print("Starting CORBA Server... ");
+        corbaServerThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    corba.TempsImpl.main(new String[]{
+                            "-ORBInitialPort", String.valueOf(CORBA_PORT),
+                            "-ORBInitialHost", "127.0.0.1",
+                            "-ORBServerHost", "127.0.0.1"
+                    });
+                } catch (Exception e) { System.err.println("CORBA Server error: " + e.getMessage()); }
+            }
+        });
+        corbaServerThread.setDaemon(true);
+        corbaServerThread.start();
+        try { Thread.sleep(3000); System.out.println("✓"); } catch (InterruptedException e) { System.out.println("✗"); }
+    }
+
+    private static void startRMIServer() {
+        System.out.print("Starting RMI Server... ");
+        rmiServerThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try { rmi.AppareilImpl.main(new String[]{}); } catch (Exception e) { System.err.println("RMI Server error: " + e.getMessage()); }
+            }
+        });
+        rmiServerThread.setDaemon(true);
+        rmiServerThread.start();
+        try { Thread.sleep(3000); System.out.println("✓"); } catch (InterruptedException e) { System.out.println("✗"); }
+    }
+
+    private static void initCORBA(String[] args) {
+        System.out.print("Connecting to CORBA services... ");
+        try {
+            orb = ORB.init(new String[]{"-ORBInitialPort", String.valueOf(CORBA_PORT), "-ORBInitialHost", "127.0.0.1"}, null);
+            org.omg.CORBA.Object objRef = orb.resolve_initial_references("NameService");
+            NamingContextExt ncRef = NamingContextExtHelper.narrow(objRef);
+            tempsService = TempsHelper.narrow(ncRef.resolve_str("TempsService"));
+            System.out.println("✓");
+        } catch (Exception e) {
+            System.out.println("✗");
+            System.err.println("Warning: CORBA connection failed. Will retry automatically.");
+        }
+    }
+
+    /* ------------------- ML Integration ------------------- */
+
+    private static String callMLPrediction(int heure, int jour, int weekend) {
+        // Try specific python path (user environment), else python3, else python
+        String pythonExecutablePath = "C:\\Users\\Ahmed\\.conda\\envs\\AhmedMBarekMLTP\\python.exe";
+        if (new File(pythonExecutablePath).exists()) {
+            String result = tryPythonCommand(pythonExecutablePath, heure, jour, weekend);
+            if (result != null) return result;
+        }
+        String result = tryPythonCommand("python3", heure, jour, weekend);
+        if (result != null) return result;
+        result = tryPythonCommand("python", heure, jour, weekend);
+        if (result != null) return result;
+        System.err.println("Warning: Python script execution failed. Falling back to Java simulation.");
+        return simulatePrediction(heure, jour, weekend);
+    }
+
+    private static String tryPythonCommand(String command, int heure, int jour, int weekend) {
+        try {
+            String projectDir = System.getProperty("user.dir");
+            String scriptPath = new File(projectDir, "ml/predict_ml.py").getAbsolutePath();
+            ProcessBuilder pb = new ProcessBuilder(command, scriptPath, String.valueOf(heure), String.valueOf(jour), String.valueOf(weekend));
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            StringBuilder output = new StringBuilder();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append(System.lineSeparator());
+            }
+            reader.close();
+            if (!p.waitFor(5, TimeUnit.SECONDS)) { p.destroyForcibly(); return null; }
+            if (p.exitValue() != 0) { return null; }
+            return output.toString();
+        } catch (IOException | InterruptedException e) {
+            return null;
+        }
+    }
+
+    private static String simulatePrediction(int heure, int jour, int weekend) {
+        double base = 35.0;
+        if (0 <= heure && heure < 6) base -= 10;
+        else if (6 <= heure && heure < 9) base += 15;
+        else if (9 <= heure && heure < 17) base += 5;
+        else if (17 <= heure && heure < 22) base += 25;
+        if (weekend == 1 && 9 <= heure && heure < 17) base += 10;
+        base += (jour % 3) * 2;
+        return "Predicted energy consumption: " + String.format("%.1f", base) + " kWh";
+    }
+
+    private static double parsePrediction(String output) {
+        try {
+            String[] lines = output.split(System.lineSeparator());
+            for (int i = 0; i < lines.length; i++) {
+                String line = lines[i];
+                if (line.contains("Predicted energy consumption:")) {
+                    String num = line.replaceAll("[^0-9.]", "");
+                    if (num.length() > 0) {
+                        return Double.parseDouble(num);
+                    }
+                }
+            }
+            return 45.0;
+        } catch (Exception e) {
+            return 45.0;
+        }
+    }
+
+    /* ------------------- Helpers ------------------- */
+
     private static byte[] readAllBytesFromStream(InputStream inputStream) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        int nRead; byte[] data = new byte[1024];
-        while ((nRead = inputStream.read(data, 0, data.length)) != -1) { buffer.write(data, 0, nRead); }
+        int nRead;
+        byte[] data = new byte[4096];
+        while ((nRead = inputStream.read(data, 0, data.length)) != -1) {
+            buffer.write(data, 0, nRead);
+        }
         return buffer.toByteArray();
     }
 
@@ -489,7 +636,12 @@ public class WebServer {
         exchange.getResponseHeaders().add("Content-Type", "application/json");
         byte[] response = json.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(200, response.length);
-        try (OutputStream os = exchange.getResponseBody()) { os.write(response); }
+        OutputStream os = exchange.getResponseBody();
+        try {
+            os.write(response);
+        } finally {
+            os.close();
+        }
     }
 
     private static void sendError(HttpExchange exchange, String message) throws IOException {
@@ -498,29 +650,68 @@ public class WebServer {
         exchange.getResponseHeaders().add("Content-Type", "application/json");
         byte[] response = error.toString().getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(500, response.length);
-        try (OutputStream os = exchange.getResponseBody()) { os.write(response); }
+        OutputStream os = exchange.getResponseBody();
+        try {
+            os.write(response);
+        } finally {
+            os.close();
+        }
     }
 
     private static boolean checkRMI() {
-        try { return Naming.lookup("rmi://localhost:" + RMI_PORT + "/AppareilService") != null; } catch (Exception e) { return false; }
+        try {
+            return Naming.lookup("rmi://localhost:" + RMI_PORT + "/AppareilService") != null;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private static String getDashboardHTML() {
-        try (InputStream is = WebServer.class.getResourceAsStream("/web/dashboard.html")) {
-            if (is == null) {
-                System.err.println("Warning: dashboard.html not found in resources. Falling back to embedded version.");
-                return getEmbeddedDashboard();
+        InputStream is = WebServer.class.getResourceAsStream("/web/dashboard.html");
+        if (is == null) {
+            System.err.println("Warning: dashboard.html not found in resources. Falling back to embedded version.");
+            return getEmbeddedDashboard();
+        }
+        BufferedReader reader = null;
+        try {
+            reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append("\n");
             }
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-                return reader.lines().collect(Collectors.joining("\n"));
-            }
-        } catch (IOException e) {
+            return sb.toString();
+        } catch (Exception e) {
             System.err.println("Warning: Could not read dashboard.html resource. " + e.getMessage());
             return getEmbeddedDashboard();
+        } finally {
+            if (reader != null) try { reader.close(); } catch (IOException ignored) {}
+            try { is.close(); } catch (IOException ignored) {}
         }
     }
 
     private static String getEmbeddedDashboard() {
         return "<!DOCTYPE html><html><head><title>Smart Energy System</title></head><body><h1>System is running...</h1><p>Could not load dashboard.html from resources.</p></body></html>";
+    }
+
+    private static boolean isPortInUse(int port) {
+        ServerSocket socket = null;
+        try {
+            socket = new ServerSocket(port);
+            return false;
+        } catch (IOException e) {
+            return true;
+        } finally {
+            if (socket != null) try { socket.close(); } catch (IOException ignored) {}
+        }
+    }
+
+    private static void openBrowser(String url) {
+        try {
+            String os = System.getProperty("os.name").toLowerCase();
+            if (os.contains("win")) Runtime.getRuntime().exec("rundll32 url.dll,FileProtocolHandler " + url);
+            else if (os.contains("mac")) Runtime.getRuntime().exec("open " + url);
+            else if (os.contains("nix") || os.contains("nux")) Runtime.getRuntime().exec("xdg-open " + url);
+        } catch (Exception e) { /* Silently fail */ }
     }
 }
