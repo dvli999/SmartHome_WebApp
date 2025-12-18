@@ -4,13 +4,20 @@ import javax.jws.WebService;
 import javax.jws.WebMethod;
 import javax.jws.WebParam;
 import javax.jws.soap.SOAPBinding;
-import soap.model.*;
-import java.util.*;
-import java.util.concurrent.CopyOnWriteArrayList;
+
+import soap.model.DeviceInfo;
+import soap.model.DeviceListResponse;
+import soap.model.DeviceOperationResponse;
+
+import web.MongoDBManager;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.rmi.Naming;
 
 /**
- * Device Management SOAP Web Service (Java 8 compatible)
+ * Device Management SOAP Web Service (Java 8 compatible) - MongoDB-backed
  */
 @WebService(
         name = "DeviceManagementService",
@@ -25,30 +32,46 @@ import java.rmi.Naming;
 )
 public class DeviceManagementService {
 
-    private static final List<DeviceInfo> devices = new CopyOnWriteArrayList<DeviceInfo>();
     private static final int RMI_PORT = 1100;
 
-    static {
-        devices.add(new DeviceInfo("Heating System", 25.0, true));
-        devices.add(new DeviceInfo("Air Conditioner", 30.0, false));
-        devices.add(new DeviceInfo("Water Heater", 15.0, true));
-        devices.add(new DeviceInfo("Lighting Grid", 10.0, true));
-        devices.add(new DeviceInfo("Entertainment System", 5.0, false));
+    // Single shared DB manager for this SOAP service
+    private final MongoDBManager db;
+
+    public DeviceManagementService() {
+        db = new MongoDBManager();
+        db.init();
+        db.seedDefaultDevicesIfEmpty();
+    }
+
+    private static DeviceInfo mapToDeviceInfo(Map<String, Object> doc) {
+        String name = (String) doc.get("name");
+        Object bc = doc.get("baseConsumption");
+        double baseConsumption = (bc instanceof Number) ? ((Number) bc).doubleValue() : 0.0;
+        Object on = doc.get("isOn");
+        boolean isOn = (on instanceof Boolean) ? (Boolean) on : false;
+        return new DeviceInfo(name, baseConsumption, isOn);
     }
 
     @WebMethod(operationName = "getAllDevices")
     public DeviceListResponse getAllDevices() {
+        List<Map<String, Object>> docs = db.getAllDevices();
+        List<DeviceInfo> list = new ArrayList<DeviceInfo>();
+        for (Map<String, Object> doc : docs) {
+            list.add(mapToDeviceInfo(doc));
+        }
         DeviceListResponse response = new DeviceListResponse();
-        response.setDevices(new ArrayList<DeviceInfo>(devices));
-        response.setTotalCount(devices.size());
+        response.setDevices(list);
+        response.setTotalCount(list.size());
         return response;
     }
 
     @WebMethod(operationName = "getDeviceByName")
     public DeviceInfo getDeviceByName(@WebParam(name = "deviceName") String deviceName) {
-        for (DeviceInfo d : devices) {
-            if (d.getName().equalsIgnoreCase(deviceName)) {
-                return d;
+        List<Map<String, Object>> all = db.getAllDevices();
+        for (Map<String, Object> doc : all) {
+            String name = (String) doc.get("name");
+            if (name != null && name.equalsIgnoreCase(deviceName)) {
+                return mapToDeviceInfo(doc);
             }
         }
         return null;
@@ -56,52 +79,31 @@ public class DeviceManagementService {
 
     @WebMethod(operationName = "toggleDevice")
     public DeviceOperationResponse toggleDevice(@WebParam(name = "deviceName") String deviceName) {
-        DeviceInfo device = null;
-        for (DeviceInfo d : devices) {
-            if (d.getName().equalsIgnoreCase(deviceName)) {
-                device = d;
-                break;
-            }
-        }
-
-        if (device != null) {
-            device.setOn(!device.isOn());
+        boolean ok = db.toggleDevicePower(deviceName);
+        if (ok) {
+            DeviceInfo device = getDeviceByName(deviceName);
             return new DeviceOperationResponse(true,
-                    device.getName() + " is now " + (device.isOn() ? "ON" : "OFF"), device);
+                    deviceName + " toggled successfully", device);
         }
         return new DeviceOperationResponse(false, "Device not found: " + deviceName, null);
     }
 
     @WebMethod(operationName = "turnOnDevice")
     public DeviceOperationResponse turnOnDevice(@WebParam(name = "deviceName") String deviceName) {
-        DeviceInfo device = null;
-        for (DeviceInfo d : devices) {
-            if (d.getName().equalsIgnoreCase(deviceName)) {
-                device = d;
-                break;
-            }
-        }
-
-        if (device != null) {
-            device.setOn(true);
-            return new DeviceOperationResponse(true, device.getName() + " turned ON", device);
+        boolean ok = db.setDevicePower(deviceName, true);
+        if (ok) {
+            DeviceInfo device = getDeviceByName(deviceName);
+            return new DeviceOperationResponse(true, deviceName + " turned ON", device);
         }
         return new DeviceOperationResponse(false, "Device not found: " + deviceName, null);
     }
 
     @WebMethod(operationName = "turnOffDevice")
     public DeviceOperationResponse turnOffDevice(@WebParam(name = "deviceName") String deviceName) {
-        DeviceInfo device = null;
-        for (DeviceInfo d : devices) {
-            if (d.getName().equalsIgnoreCase(deviceName)) {
-                device = d;
-                break;
-            }
-        }
-
-        if (device != null) {
-            device.setOn(false);
-            return new DeviceOperationResponse(true, device.getName() + " turned OFF", device);
+        boolean ok = db.setDevicePower(deviceName, false);
+        if (ok) {
+            DeviceInfo device = getDeviceByName(deviceName);
+            return new DeviceOperationResponse(true, deviceName + " turned OFF", device);
         }
         return new DeviceOperationResponse(false, "Device not found: " + deviceName, null);
     }
@@ -113,8 +115,11 @@ public class DeviceManagementService {
                     Naming.lookup("rmi://localhost:" + RMI_PORT + "/AppareilService");
             appareil.eteindre();
 
-            for (DeviceInfo device : devices) {
-                device.setOn(false);
+            // Turn off all devices in DB
+            List<Map<String, Object>> all = db.getAllDevices();
+            for (Map<String, Object> doc : all) {
+                String name = (String) doc.get("name");
+                if (name != null) db.setDevicePower(name, false);
             }
             return new DeviceOperationResponse(true,
                     "All devices shut down via RMI successfully", null);
@@ -126,27 +131,19 @@ public class DeviceManagementService {
 
     @WebMethod(operationName = "getTotalConsumption")
     public double getTotalConsumption() {
-        double total = 0.0;
-        for (DeviceInfo device : devices) {
-            if (device.isOn()) {
-                total += device.getBaseConsumption();
-            }
-        }
-        return total;
+        return db.getTotalConsumptionForOnDevices();
     }
 
     @WebMethod(operationName = "getDevicesByStatus")
     public DeviceListResponse getDevicesByStatus(@WebParam(name = "isOn") boolean isOn) {
-        List<DeviceInfo> filteredDevices = new ArrayList<DeviceInfo>();
-        for (DeviceInfo d : devices) {
-            if (d.isOn() == isOn) {
-                filteredDevices.add(d);
-            }
+        List<Map<String, Object>> docs = db.getDevicesByStatus(isOn);
+        List<DeviceInfo> list = new ArrayList<DeviceInfo>();
+        for (Map<String, Object> doc : docs) {
+            list.add(mapToDeviceInfo(doc));
         }
-
         DeviceListResponse response = new DeviceListResponse();
-        response.setDevices(filteredDevices);
-        response.setTotalCount(filteredDevices.size());
+        response.setDevices(list);
+        response.setTotalCount(list.size());
         return response;
     }
 
@@ -156,35 +153,18 @@ public class DeviceManagementService {
             @WebParam(name = "baseConsumption") double baseConsumption,
             @WebParam(name = "isOn") boolean isOn) {
 
-        boolean exists = false;
-        for (DeviceInfo d : devices) {
-            if (d.getName().equalsIgnoreCase(name)) {
-                exists = true;
-                break;
-            }
-        }
-
-        if (exists) {
+        boolean inserted = db.insertDevice(name, baseConsumption, isOn);
+        if (!inserted) {
             return new DeviceOperationResponse(false, "Device already exists: " + name, null);
         }
-
-        DeviceInfo newDevice = new DeviceInfo(name, baseConsumption, isOn);
-        devices.add(newDevice);
-        return new DeviceOperationResponse(true, "Device added successfully: " + name, newDevice);
+        return new DeviceOperationResponse(true, "Device added successfully: " + name,
+                new DeviceInfo(name, baseConsumption, isOn));
     }
 
     @WebMethod(operationName = "removeDevice")
     public DeviceOperationResponse removeDevice(@WebParam(name = "deviceName") String deviceName) {
-        DeviceInfo toRemove = null;
-        for (DeviceInfo d : devices) {
-            if (d.getName().equalsIgnoreCase(deviceName)) {
-                toRemove = d;
-                break;
-            }
-        }
-
-        if (toRemove != null) {
-            devices.remove(toRemove);
+        boolean ok = db.removeDevice(deviceName);
+        if (ok) {
             return new DeviceOperationResponse(true, "Device removed: " + deviceName, null);
         }
         return new DeviceOperationResponse(false, "Device not found: " + deviceName, null);
@@ -195,18 +175,11 @@ public class DeviceManagementService {
             @WebParam(name = "deviceName") String deviceName,
             @WebParam(name = "newConsumption") double newConsumption) {
 
-        DeviceInfo device = null;
-        for (DeviceInfo d : devices) {
-            if (d.getName().equalsIgnoreCase(deviceName)) {
-                device = d;
-                break;
-            }
-        }
-
-        if (device != null) {
-            device.setBaseConsumption(newConsumption);
+        boolean ok = db.updateDeviceConsumption(deviceName, newConsumption);
+        if (ok) {
+            DeviceInfo device = getDeviceByName(deviceName);
             return new DeviceOperationResponse(true,
-                    "Consumption updated for " + device.getName(), device);
+                    "Consumption updated for " + deviceName, device);
         }
         return new DeviceOperationResponse(false, "Device not found: " + deviceName, null);
     }

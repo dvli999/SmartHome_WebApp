@@ -4,10 +4,7 @@ import javax.xml.ws.Endpoint;
 import soap.service.EnergyManagementService;
 import soap.service.DeviceManagementService;
 
-/**
- * SOAP Service Publisher (Java 8 compatible)
- * Publishes all SOAP web services using JAX-WS 2.x
- */
+
 public class SoapServicePublisher {
 
     private static final String ENERGY_SERVICE_URL = "http://localhost:8089/soap/EnergyManagementService";

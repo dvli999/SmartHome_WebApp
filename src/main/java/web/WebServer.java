@@ -5,6 +5,7 @@ import org.json.*;
 import corba.SmartHome.*;
 import org.omg.CORBA.ORB;
 import org.omg.CosNaming.*;
+
 import soap.SoapServicePublisher;
 
 import java.io.*;
@@ -14,20 +15,6 @@ import java.rmi.Naming;
 import java.util.*;
 import java.util.concurrent.*;
 
-/**
- * WebServer (merged) - Java 1.8 compatible
- * - REST endpoints
- * - SOAP publisher integration (via SoapServicePublisher)
- * - CORBA client + server launcher helpers
- * - RMI server launcher helper
- * - MongoDBManager usage for persistence (external)
- *
- * NOTE: This file assumes external classes are present:
- * - MongoDBManager (with init, saveEnergyRecord, getLatestEnergyRecord, getEnergyHistory, close)
- * - SoapServicePublisher with methods publishServices() and stopServices()
- * - corba.TempsImpl and temps CORBA artifacts
- * - rmi.AppareilImpl and rmi.AppareilInterface
- */
 public class WebServer {
 
     private static ORB orb;
@@ -42,40 +29,12 @@ public class WebServer {
     private static Thread rmiServerThread;
     private static HttpServer httpServer;
 
+    // Shared DB manager
     private static final MongoDBManager databaseManager = new MongoDBManager();
+
     private static final List<Map<String, Object>> notifications = new CopyOnWriteArrayList<>();
     private static double threshold = 70.0;
     private static boolean isRunning = true;
-
-    private static final List<Device> devices = new CopyOnWriteArrayList<>();
-
-    private static class Device {
-        String name;
-        double baseConsumption;
-        boolean isOn;
-
-        Device(String name, double baseConsumption, boolean isOn) {
-            this.name = name;
-            this.baseConsumption = baseConsumption;
-            this.isOn = isOn;
-        }
-
-        public JSONObject toJson() {
-            JSONObject json = new JSONObject();
-            json.put("name", this.name);
-            json.put("consumption", this.baseConsumption);
-            json.put("isOn", this.isOn);
-            return json;
-        }
-    }
-
-    private static void initializeDevices() {
-        devices.add(new Device("Heating System", 25.0, true));
-        devices.add(new Device("Air Conditioner", 30.0, false));
-        devices.add(new Device("Water Heater", 15.0, true));
-        devices.add(new Device("Lighting Grid", 10.0, true));
-        devices.add(new Device("Entertainment System", 5.0, false));
-    }
 
     public static void main(String[] args) {
         System.out.println("╔════════════════════════════════════════════════════════════╗");
@@ -91,20 +50,16 @@ public class WebServer {
         }));
 
         try {
-            databaseManager.init(); // Initialize DB
-            initializeDevices();
+            databaseManager.init();
+            databaseManager.seedDefaultDevicesIfEmpty();
+
             startORBD();
             startCORBAServer();
             startRMIServer();
             initCORBA(args);
 
-            // Start SOAP services (if available)
             startSOAPServices();
-
-            // Start HTTP server (REST)
             startHTTPServer();
-
-            // Start background collector
             startBackgroundCollector();
 
             System.out.println("\n╔════════════════════════════════════════════════════════════╗");
@@ -157,7 +112,6 @@ public class WebServer {
             });
             soapThread.setDaemon(false);
             soapThread.start();
-            // give it a moment
             try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
             System.out.println("✓");
         } catch (Exception e) {
@@ -188,14 +142,12 @@ public class WebServer {
         httpServer.createContext("/api/notifications", new NotificationsHandler());
         httpServer.createContext("/api/threshold", new ThresholdHandler());
         httpServer.createContext("/api/devices", new DevicesHandler());
-        // Add SOAP info endpoint
         httpServer.createContext("/api/soap-info", new SoapInfoHandler());
         httpServer.setExecutor(Executors.newFixedThreadPool(10));
         httpServer.start();
         System.out.println("✓");
     }
 
-    // SOAP info endpoint
     static class SoapInfoHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -235,11 +187,7 @@ public class WebServer {
                 byte[] response = html.getBytes(StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(200, response.length);
                 OutputStream os = exchange.getResponseBody();
-                try {
-                    os.write(response);
-                } finally {
-                    os.close();
-                }
+                try { os.write(response); } finally { os.close(); }
             } else {
                 sendError(exchange, "Not Found");
             }
@@ -323,15 +271,27 @@ public class WebServer {
             setCORS(exchange);
             if ("OPTIONS".equals(exchange.getRequestMethod())) { exchange.sendResponseHeaders(204, -1); return; }
             if (!"POST".equals(exchange.getRequestMethod())) { sendError(exchange, "Method not allowed"); return; }
+
             String path = exchange.getRequestURI().getPath();
             String action = path.substring(path.lastIndexOf('/') + 1);
+
             try {
-                rmi.AppareilInterface appareil = (rmi.AppareilInterface) Naming.lookup("rmi://localhost:" + RMI_PORT + "/AppareilService");
+                rmi.AppareilInterface appareil = (rmi.AppareilInterface)
+                        Naming.lookup("rmi://localhost:" + RMI_PORT + "/AppareilService");
+
                 if ("shutdown-all".equals(action)) {
                     appareil.eteindre();
-                    for (Device device : devices) { device.isOn = false; }
+
+                    // turn off all devices in MongoDB
+                    List<Map<String, Object>> all = databaseManager.getAllDevices();
+                    for (Map<String, Object> doc : all) {
+                        String name = (String) doc.get("name");
+                        if (name != null) databaseManager.setDevicePower(name, false);
+                    }
+
                     addNotification("warning", "Manual shutdown command executed for all devices.", "RMI Service");
                 }
+
                 JSONObject response = new JSONObject();
                 response.put("success", true);
                 response.put("message", "Device command '" + action + "' executed via RMI");
@@ -342,14 +302,32 @@ public class WebServer {
         }
     }
 
+    /**
+     * REST endpoint used by the webpage to show devices.
+     * Now reads from MongoDB 'devices' collection, which is also used by SOAP.
+     */
     static class DevicesHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             setCORS(exchange);
             if ("OPTIONS".equals(exchange.getRequestMethod())) { exchange.sendResponseHeaders(204, -1); return; }
+
+            List<Map<String, Object>> all = databaseManager.getAllDevices();
             JSONArray deviceArray = new JSONArray();
-            for (Device device : devices) {
-                deviceArray.put(device.toJson());
+            for (Map<String, Object> doc : all) {
+                JSONObject json = new JSONObject();
+                json.put("name", doc.get("name"));
+
+                Object bc = doc.get("baseConsumption");
+                double baseConsumption = (bc instanceof Number) ? ((Number) bc).doubleValue() : 0.0;
+
+                Object on = doc.get("isOn");
+                boolean isOn = (on instanceof Boolean) ? (Boolean) on : false;
+
+                // Keep frontend field names same as before
+                json.put("consumption", baseConsumption);
+                json.put("isOn", isOn);
+                deviceArray.put(json);
             }
             sendJSON(exchange, deviceArray.toString());
         }
@@ -384,7 +362,7 @@ public class WebServer {
         }
     }
 
-    /* ------------------- Utilities and Background ------------------- */
+    /* ------------------- Background Collector ------------------- */
 
     private static void startBackgroundCollector() {
         ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
@@ -402,17 +380,21 @@ public class WebServer {
         try {
             if (tempsService == null) { initCORBA(new String[]{}); return; }
 
+            // compute currentActualConsumption from MongoDB devices
             double currentActualConsumption = 0.0;
-            for (Device device : devices) {
-                boolean wasOn = device.isOn;
-                if (Math.random() < 0.1) { device.isOn = !device.isOn; }
-                if (device.isOn) { currentActualConsumption += device.baseConsumption; }
-                if (wasOn && !device.isOn) {
-                    addNotification("warning", device.name + " has been stopped.", "Device Control");
-                } else if (!wasOn && device.isOn) {
-                    addNotification("info", device.name + " is back online.", "Device Control");
-                }
+
+            List<Map<String, Object>> allDevices = databaseManager.getAllDevices();
+            for (Map<String, Object> doc : allDevices) {
+                Object on = doc.get("isOn");
+                boolean isOn = (on instanceof Boolean) ? (Boolean) on : false;
+
+                Object bc = doc.get("baseConsumption");
+                double baseConsumption = (bc instanceof Number) ? ((Number) bc).doubleValue() : 0.0;
+
+                if (isOn) currentActualConsumption += baseConsumption;
             }
+
+            // noise
             currentActualConsumption += (Math.random() * 4 - 2);
 
             int heure = tempsService.getHeure();
@@ -429,7 +411,6 @@ public class WebServer {
             data.put("actual", Math.round(currentActualConsumption * 10.0) / 10.0);
             data.put("predicted", Math.round(predictedConsumption * 10.0) / 10.0);
             data.put("status", currentActualConsumption > threshold ? "ELEVEE" : "NORMAL");
-
             databaseManager.saveEnergyRecord(data);
 
             if (currentActualConsumption > threshold) {
@@ -438,15 +419,19 @@ public class WebServer {
                     rmi.AppareilInterface appareil = (rmi.AppareilInterface)
                             Naming.lookup("rmi://localhost:" + RMI_PORT + "/AppareilService");
                     appareil.eteindre();
-                    for (Device device : devices) {
-                        if (device.isOn) {
-                            device.isOn = false;
-                            addNotification("success", device.name + " shut down automatically via RMI.", "RMI Service");
+
+                    // turn off all devices in MongoDB
+                    List<Map<String, Object>> all = databaseManager.getAllDevices();
+                    for (Map<String, Object> doc : all) {
+                        String name = (String) doc.get("name");
+                        if (name != null) {
+                            databaseManager.setDevicePower(name, false);
                         }
                     }
-                } catch (Exception e) { /* Silently handle RMI errors */ }
+
+                } catch (Exception e) { /* silently ignore */ }
             }
-        } catch (Exception e) { /* Silently handle other errors */ }
+        } catch (Exception e) { /* silently ignore */ }
     }
 
     private static void addNotification(String type, String message, String source) {
@@ -470,7 +455,6 @@ public class WebServer {
             httpServer.stop(1);
             System.out.println("  ✓ Web Server stopped");
         }
-        // Stop SOAP
         stopSOAPServices();
         databaseManager.close();
         if (orbdProcess != null && orbdProcess.isAlive()) {
@@ -546,10 +530,9 @@ public class WebServer {
         }
     }
 
-    /* ------------------- ML Integration ------------------- */
+    /* ------------------- ML Integration (unchanged) ------------------- */
 
     private static String callMLPrediction(int heure, int jour, int weekend) {
-        // Try specific python path (user environment), else python3, else python
         String pythonExecutablePath = "C:\\Users\\Ahmed\\.conda\\envs\\AhmedMBarekMLTP\\python.exe";
         if (new File(pythonExecutablePath).exists()) {
             String result = tryPythonCommand(pythonExecutablePath, heure, jour, weekend);
@@ -637,11 +620,7 @@ public class WebServer {
         byte[] response = json.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(200, response.length);
         OutputStream os = exchange.getResponseBody();
-        try {
-            os.write(response);
-        } finally {
-            os.close();
-        }
+        try { os.write(response); } finally { os.close(); }
     }
 
     private static void sendError(HttpExchange exchange, String message) throws IOException {
@@ -651,11 +630,7 @@ public class WebServer {
         byte[] response = error.toString().getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(500, response.length);
         OutputStream os = exchange.getResponseBody();
-        try {
-            os.write(response);
-        } finally {
-            os.close();
-        }
+        try { os.write(response); } finally { os.close(); }
     }
 
     private static boolean checkRMI() {
@@ -677,9 +652,7 @@ public class WebServer {
             reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder();
             String line;
-            while ((line = reader.readLine()) != null) {
-                sb.append(line).append("\n");
-            }
+            while ((line = reader.readLine()) != null) sb.append(line).append("\n");
             return sb.toString();
         } catch (Exception e) {
             System.err.println("Warning: Could not read dashboard.html resource. " + e.getMessage());
@@ -712,6 +685,6 @@ public class WebServer {
             if (os.contains("win")) Runtime.getRuntime().exec("rundll32 url.dll,FileProtocolHandler " + url);
             else if (os.contains("mac")) Runtime.getRuntime().exec("open " + url);
             else if (os.contains("nix") || os.contains("nux")) Runtime.getRuntime().exec("xdg-open " + url);
-        } catch (Exception e) { /* Silently fail */ }
+        } catch (Exception e) { /* silently ignore */ }
     }
 }
